@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Cloth Simulation</title>
+    <style>
+        body {
+            background-color: #000;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            user-select: none;
+        }
+        canvas {
+            display: block;
+            cursor: default;
+        }
+    </style>
+</head>
+<body>
+
+<canvas id="canvas"></canvas>
+
+<script>
+    const settings = {
+        friction: 0.99,
+        gravity: 0.2,
+        bounce: 0.9,
+        stiffness: 3,
+        spacing: 12,
+        mouseSize: 20,
+        tearDistance: 50, // Хрупкость при рывке
+        cutPrecision: 5
+    };
+
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+
+    let width, height;
+    let points = [];
+    let constraints = [];
+
+    let barStartX = 0;
+    let barEndX = 0;
+    let barY = 40;
+
+    const mouse = {
+        x: 0,
+        y: 0,
+        px: 0,
+        py: 0,
+        down: false
+    };
+
+    class Point {
+        constructor(x, y) {
+            this.x = x;
+            this.y = y;
+            this.oldx = x;
+            this.oldy = y;
+            this.pinned = false;
+        }
+
+        update() {
+            if (this.pinned) return;
+
+            let vx = (this.x - this.oldx) * settings.friction;
+            let vy = (this.y - this.oldy) * settings.friction;
+
+            this.oldx = this.x;
+            this.oldy = this.y;
+
+            this.x += vx;
+            this.y += vy;
+            this.y += settings.gravity;
+
+            if (this.y >= height) {
+                this.y = height;
+                this.oldy = this.y + vy * settings.bounce;
+            }
+
+            // --- ВЕТЕР ---
+            let dx = this.x - mouse.x;
+            let dy = this.y - mouse.y;
+            let dist = Math.sqrt(dx * dx + dy * dy);
+
+            if (dist < settings.mouseSize && !mouse.down) {
+                let mouseDx = mouse.x - mouse.px;
+                let mouseDy = mouse.y - mouse.py;
+
+                let mouseSpeed = Math.sqrt(mouseDx*mouseDx + mouseDy*mouseDy);
+                let power = 1 - (dist / settings.mouseSize);
+
+                // Сила удара зависит от скорости
+                let force = 0.5 + mouseSpeed * 0.4;
+
+                this.x += mouseDx * power * force;
+                this.y += mouseDy * power * force;
+            }
+        }
+    }
+
+    class Constraint {
+        constructor(p1, p2) {
+            this.p1 = p1;
+            this.p2 = p2;
+            this.length = settings.spacing;
+        }
+
+        resolve() {
+            let dx = this.p1.x - this.p2.x;
+            let dy = this.p1.y - this.p2.y;
+            let dist = Math.sqrt(dx * dx + dy * dy);
+
+            if (dist > settings.tearDistance) {
+                return true;
+            }
+
+            let diff = (this.length - dist) / dist;
+            let offsetX = dx * diff * 0.5;
+            let offsetY = dy * diff * 0.5;
+
+            if (!this.p1.pinned) {
+                this.p1.x += offsetX;
+                this.p1.y += offsetY;
+            }
+            if (!this.p2.pinned) {
+                this.p2.x -= offsetX;
+                this.p2.y -= offsetY;
+            }
+            return false;
+        }
+
+        draw() {
+            ctx.moveTo(this.p1.x, this.p1.y);
+            ctx.lineTo(this.p2.x, this.p2.y);
+        }
+    }
+
+    function getLineIntersection(p1x, p1y, p2x, p2y, p3x, p3y, p4x, p4y) {
+        let det = (p2x - p1x) * (p4y - p3y) - (p2y - p1y) * (p4x - p3x);
+        if (det === 0) return false;
+        let lambda = ((p4y - p3y) * (p4x - p1x) + (p3x - p4x) * (p4y - p1y)) / det;
+        let gamma = ((p1y - p2y) * (p4x - p1x) + (p2x - p1x) * (p4y - p1y)) / det;
+        return (0 < lambda && lambda < 1) && (0 < gamma && gamma < 1);
+    }
+
+    function pointToSegmentDistance(px, py, x1, y1, x2, y2) {
+        let A = px - x1;
+        let B = py - y1;
+        let C = x2 - x1;
+        let D = y2 - y1;
+        let dot = A * C + B * D;
+        let len_sq = C * C + D * D;
+        let param = -1;
+        if (len_sq !== 0) param = dot / len_sq;
+        let xx, yy;
+        if (param < 0) { xx = x1; yy = y1; }
+        else if (param > 1) { xx = x2; yy = y2; }
+        else { xx = x1 + param * C; yy = y1 + param * D; }
+        let dx = px - xx;
+        let dy = py - yy;
+        return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    function init() {
+        width = canvas.width = window.innerWidth;
+        height = canvas.height = window.innerHeight;
+        points = [];
+        constraints = [];
+
+        const cols = Math.floor(width / settings.spacing) - 10;
+        const rows = Math.floor(height / settings.spacing / 1.5);
+
+        const startX = (width - cols * settings.spacing) / 2;
+        barY = 40;
+        barStartX = startX;
+        barEndX = startX + (cols - 1) * settings.spacing;
+
+        for (let y = 0; y < rows; y++) {
+            for (let x = 0; x < cols; x++) {
+                let p = new Point(startX + x * settings.spacing, barY + y * settings.spacing);
+
+                if (y === 0) {
+                    p.pinned = true;
+                } else {
+                    // Стартовая встряска
+                    p.oldx += (Math.random() - 0.5) * 30;
+                    p.oldy += (Math.random() - 0.5) * 10;
+                }
+
+                points.push(p);
+            }
+        }
+
+        for (let y = 0; y < rows; y++) {
+            for (let x = 0; x < cols; x++) {
+                let p1 = points[y * cols + x];
+                if (x < cols - 1) {
+                    constraints.push(new Constraint(p1, points[y * cols + (x + 1)]));
+                }
+                if (y < rows - 1) {
+                    constraints.push(new Constraint(p1, points[(y + 1) * cols + x]));
+                }
+            }
+        }
+    }
+
+    function update() {
+        ctx.clearRect(0, 0, width, height);
+
+        for (let i = 0; i < points.length; i++) points[i].update();
+
+        // Логика НОЖА
+        if (mouse.down) {
+            let mouseMoved = (mouse.x !== mouse.px || mouse.y !== mouse.py);
+            for (let i = constraints.length - 1; i >= 0; i--) {
+                let c = constraints[i];
+                let cut = false;
+                if (mouseMoved) {
+                    if (getLineIntersection(c.p1.x, c.p1.y, c.p2.x, c.p2.y, mouse.px, mouse.py, mouse.x, mouse.y)) cut = true;
+                }
+                if (!cut) {
+                    let dist = pointToSegmentDistance(mouse.x, mouse.y, c.p1.x, c.p1.y, c.p2.x, c.p2.y);
+                    if (dist < settings.cutPrecision) cut = true;
+                }
+                if (cut) constraints.splice(i, 1);
+            }
+        }
+
+        // Физика
+        for (let k = 0; k < 3; k++) {
+            for (let i = constraints.length - 1; i >= 0; i--) {
+                if (constraints[i].resolve()) {
+                    constraints.splice(i, 1);
+                }
+            }
+        }
+
+        // Отрисовка ТКАНИ (Белая)
+        ctx.beginPath();
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 0.5;
+        for (let i = 0; i < constraints.length; i++) constraints[i].draw();
+        ctx.stroke();
+
+        // Отрисовка БАЛКИ (Тонкая)
+        ctx.beginPath();
+        ctx.strokeStyle = '#888';
+        ctx.lineWidth = 2; // Тонкая
+        ctx.lineCap = 'round';
+        ctx.moveTo(barStartX, barY);
+        ctx.lineTo(barEndX, barY);
+        ctx.stroke();
+
+        mouse.px = mouse.x;
+        mouse.py = mouse.y;
+        requestAnimationFrame(update);
+    }
+
+    window.addEventListener('resize', init);
+    window.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+    window.addEventListener('mousedown', () => mouse.down = true);
+    window.addEventListener('mouseup', () => mouse.down = false);
+
+    window.addEventListener('touchmove', e => {
+        e.preventDefault(); mouse.x = e.touches[0].clientX; mouse.y = e.touches[0].clientY;
+    }, {passive: false});
+    window.addEventListener('touchstart', e => {
+        e.preventDefault(); mouse.down = true; mouse.x = mouse.px = e.touches[0].clientX; mouse.y = mouse.py = e.touches[0].clientY;
+    }, {passive: false});
+    window.addEventListener('touchend', e => { e.preventDefault(); mouse.down = false; });
+
+    init();
+    update();
+
+</script>
+</body>
+</html>
